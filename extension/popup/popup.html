@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI TTS Reader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <header class="popup-header">
+      <span class="popup-logo">🎧</span>
+      <div>
+        <h1>AI TTS Reader</h1>
+        <span class="popup-version">v0.1.0 — POC</span>
+      </div>
+    </header>
+
+    <div class="status-row">
+      <span class="status-dot" id="status-dot"></span>
+      <span class="status-text" id="status-text">Checking server...</span>
+    </div>
+
+    <div class="action-section">
+      <button class="btn-primary" id="btn-read">
+        ▶&nbsp; Read This Page
+      </button>
+      <p class="action-hint">Extracts article text, analyzes with AI, then reads aloud with synchronized highlighting.</p>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="settings-section">
+      <label class="settings-label">Server URL</label>
+      <div class="server-row">
+        <input type="text" id="server-url" placeholder="http://localhost:3000" autocomplete="off" spellcheck="false">
+        <button class="btn-save" id="btn-save">Save</button>
+      </div>
+      <p class="settings-hint">Keep the local server running before reading.</p>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

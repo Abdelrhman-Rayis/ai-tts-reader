@@ -1,0 +1,17 @@
+# Dependencies
+server/node_modules/
+
+# Environment (contains API keys — never commit)
+server/.env
+.env
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
