@@ -29,7 +29,11 @@
       activeSpan: null,      // the span currently underlined
       timingInterval: null   // interval driving timing-based word advance
     },
-    knowledgeHighlights: [] // { el, cssClass, badge } for cleanup
+    knowledgeHighlights: [], // { el, cssClass, badge } for cleanup
+    // Hover-to-read
+    hoverEl: null,           // currently hovered DOM element
+    hoverTooltipEl: null,    // the floating tooltip pill element
+    hoverListenersAdded: false
   };
 
   // Session counter — incremented on every main() call.
@@ -47,13 +51,14 @@
   function teardown() {
     _session++;                    // invalidates all running background tasks
     speechSynthesis.cancel();
-    state.playing   = false;
-    state.paused    = false;
+    state.playing = false;
+    state.paused = false;
     state.sentences = [];
-    state.index     = -1;
+    state.index = -1;
     resetWordState();
     clearKnowledgeHighlights();
     clearHighlight();
+    hideHoverTooltip();
     if (state.playerEl) { state.playerEl.remove(); state.playerEl = null; }
     window.__ttsReaderActive = false;
   }
@@ -72,11 +77,14 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'START_READING') {
       if (!window.__ttsReaderActive) {
+        // First launch on this page
         window.__ttsReaderActive = true;
         main();
-      } else {
+      } else if (state.paused) {
+        // Reader is open but paused — resume
         togglePlayPause();
       }
+      // If already playing, do nothing (avoid double-start or toggling to pause)
     }
     if (msg.type === 'STOP_READING') {
       stopAndClose();
@@ -119,12 +127,14 @@
     }
 
     // Fallback: score all block elements by paragraph density
+    // Exclude elements inside navigation using cheap selector checks only
     if (!root) {
       let best = null, bestScore = 0;
       document.querySelectorAll('div, section').forEach(el => {
+        if (el.closest('nav, header, footer, aside, [role="navigation"], [role="banner"]')) return;
         const ps = el.querySelectorAll('p');
         const score = Array.from(ps).reduce((acc, p) => acc + p.innerText.trim().length, 0);
-        if (score > bestScore && !el.closest('nav, header, footer, aside')) {
+        if (score > bestScore) {
           bestScore = score;
           best = el;
         }
@@ -140,6 +150,10 @@
     function walk(el) {
       if (SKIP.has(el.tagName)) return;
       if (seen.has(el)) return;
+      // Skip navigation roles (cheap attribute check — no forced reflow)
+      if (el.getAttribute('role') === 'navigation' ||
+        el.getAttribute('role') === 'banner' ||
+        el.getAttribute('role') === 'complementary') return;
 
       if (blockTags.has(el.tagName)) {
         const text = el.innerText.trim();
@@ -159,10 +173,29 @@
     // Filter: remove nav-like short items and duplicates
     return blocks.filter(b => {
       if (b.text.length < 15) return false;
-      // Skip blocks that look like navigation (very short, all-caps, link-only)
-      if (b.tag === 'LI' && b.text.length < 30 && b.el.closest('nav, menu')) return false;
+      // Skip blocks inside any nav/menu ancestor
+      if (b.el.closest('nav, menu, [role="navigation"], [role="menubar"]')) return false;
+      // Skip very short LI items that look like menu entries
+      if (b.tag === 'LI' && b.text.length < 40 && b.el.closest('nav, menu, header')) return false;
       return true;
     });
+  }
+
+  // ─────────────────────────────────────────────
+  // Find the "natural" start sentence index.
+  // Prefers the first H1 block; falls back to index 0.
+  // This prevents bookmarks from re-starting reading in nav items.
+  // ─────────────────────────────────────────────
+  function findNaturalStartIndex(sentences) {
+    // Find the first sentence associated with an H1 element
+    for (let i = 0; i < sentences.length; i++) {
+      if (sentences[i].paraTag === 'H1') return i;
+    }
+    // Fallback: first sentence that is a heading (H2/H3) if no H1
+    for (let i = 0; i < sentences.length; i++) {
+      if (['H2', 'H3'].includes(sentences[i].paraTag)) return i;
+    }
+    return 0;
   }
 
   // ─────────────────────────────────────────────
@@ -232,18 +265,18 @@
 
     n = Math.floor(n);
     if (n === 0) return 'zero';
-    if (n < 20)   return ONES[n];
-    if (n < 100)  return TENS[Math.floor(n / 10)] + (n % 10 ? ' ' + ONES[n % 10] : '');
+    if (n < 20) return ONES[n];
+    if (n < 100) return TENS[Math.floor(n / 10)] + (n % 10 ? ' ' + ONES[n % 10] : '');
     if (n < 1000) return ONES[Math.floor(n / 100)] + ' hundred' + (n % 100 ? ' ' + numberToWords(n % 100) : '');
-    if (n < 1e6)  return numberToWords(Math.floor(n / 1000)) + ' thousand' + (n % 1000 ? ' ' + numberToWords(n % 1000) : '');
-    if (n < 1e9)  return numberToWords(Math.floor(n / 1e6))  + ' million'  + (n % 1e6  ? ' ' + numberToWords(n % 1e6)  : '');
+    if (n < 1e6) return numberToWords(Math.floor(n / 1000)) + ' thousand' + (n % 1000 ? ' ' + numberToWords(n % 1000) : '');
+    if (n < 1e9) return numberToWords(Math.floor(n / 1e6)) + ' million' + (n % 1e6 ? ' ' + numberToWords(n % 1e6) : '');
     return numberToWords(Math.floor(n / 1e9)) + ' billion' + (n % 1e9 ? ' ' + numberToWords(n % 1e9) : '');
   }
 
-  const ONES = ['zero','one','two','three','four','five','six','seven','eight','nine',
-                'ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen',
-                'seventeen','eighteen','nineteen'];
-  const TENS = ['','','twenty','thirty','forty','fifty','sixty','seventy','eighty','ninety'];
+  const ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+    'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+    'seventeen', 'eighteen', 'nineteen'];
+  const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
 
   function normalizeForSpeech(text) {
     return text
@@ -366,38 +399,38 @@
   // Rule-based speech annotation — instant, no server
   function ruleBasedAnnotate(sentences, tag) {
     const isHeading = ['H1', 'H2', 'H3', 'H4'].includes(tag);
-    const isList    = tag === 'LI';
-    const isQuote   = tag === 'BLOCKQUOTE';
-    const total     = sentences.length;
+    const isList = tag === 'LI';
+    const isQuote = tag === 'BLOCKQUOTE';
+    const total = sentences.length;
 
     return sentences.map((text, i) => {
       const wordCount = text.split(/\s+/).length;
-      const isFirst   = i === 0;
-      const isLast    = i === total - 1;
+      const isFirst = i === 0;
+      const isLast = i === total - 1;
 
       // Rate
       let rate;
-      if (isHeading)          rate = 0.82;   // slow and clear for headings
+      if (isHeading) rate = 0.82;   // slow and clear for headings
       else if (wordCount > 35) rate = 0.88;  // long/dense sentence
-      else if (wordCount < 7)  rate = 1.05;  // short transitional
-      else if (isList)         rate = 1.0;
-      else                     rate = 0.95;  // comfortable reading pace
+      else if (wordCount < 7) rate = 1.05;  // short transitional
+      else if (isList) rate = 1.0;
+      else rate = 0.95;  // comfortable reading pace
 
       // Pause after this sentence
       let pause_after;
-      if (tag === 'H1')        pause_after = 1200;
-      else if (tag === 'H2')   pause_after = 800;
-      else if (tag === 'H3')   pause_after = 600;
-      else if (isLast)         pause_after = 380;  // paragraph end
-      else                     pause_after = 110;  // mid-paragraph flow
+      if (tag === 'H1') pause_after = 1200;
+      else if (tag === 'H2') pause_after = 800;
+      else if (tag === 'H3') pause_after = 600;
+      else if (isLast) pause_after = 380;  // paragraph end
+      else pause_after = 110;  // mid-paragraph flow
 
       // Importance heuristic: first sentence of a paragraph = topic sentence
       const important = isFirst && !isList && !isHeading;
 
       // Type from HTML structure
       const type = isHeading ? 'heading' :
-                   isQuote   ? 'example' :
-                   isList    ? 'normal'  : 'normal';
+        isQuote ? 'example' :
+          isList ? 'normal' : 'normal';
 
       return { text, rate, pause_after, important, type };
     });
@@ -520,11 +553,11 @@
     const summaryHeader = div.querySelector('#tts-summary-header');
     if (summaryHeader) {
       summaryHeader.addEventListener('click', () => {
-        const body    = div.querySelector('#tts-summary-body');
+        const body = div.querySelector('#tts-summary-body');
         const chevron = div.querySelector('#tts-summary-chevron');
         if (!body) return;
         const open = body.style.display !== 'none';
-        body.style.display    = open ? 'none' : 'block';
+        body.style.display = open ? 'none' : 'block';
         if (chevron) chevron.classList.toggle('open', !open);
       });
     }
@@ -696,10 +729,10 @@
       state.wordState.timingInterval = null;
     }
     restoreWordSpans(state.wordState.wrappedEl);
-    state.wordState.wrappedEl    = null;
-    state.wordState.spans        = [];
+    state.wordState.wrappedEl = null;
+    state.wordState.spans = [];
     state.wordState.paraWordOffset = 0;
-    state.wordState.activeSpan   = null;
+    state.wordState.activeSpan = null;
   }
 
   // ─────────────────────────────────────────────
@@ -720,16 +753,16 @@
   function voiceScore(v) {
     if (!v.lang.startsWith('en')) return -1;
     const n = v.name;
-    if (n.includes('(Enhanced)'))  return 100;
-    if (n.includes('(Premium)'))   return 90;
-    if (n.includes('(Neural)'))    return 85;
-    if (n.startsWith('Google'))    return 70;
+    if (n.includes('(Enhanced)')) return 100;
+    if (n.includes('(Premium)')) return 90;
+    if (n.includes('(Neural)')) return 85;
+    if (n.startsWith('Google')) return 70;
     if (n.includes('Samantha') || n.includes('Karen') || n.includes('Daniel') ||
-        n.includes('Moira')    || n.includes('Tessa') || n.includes('Serena'))  return 60;
+      n.includes('Moira') || n.includes('Tessa') || n.includes('Serena')) return 60;
     if (n.includes('Microsoft') && (n.includes('Jenny') || n.includes('Aria') ||
-        n.includes('Guy') || n.includes('Zira'))) return 55;
+      n.includes('Guy') || n.includes('Zira'))) return 55;
     if (v.lang === 'en-US') return 30;
-    if (v.lang.startsWith('en'))   return 20;
+    if (v.lang.startsWith('en')) return 20;
     return 10;
   }
 
@@ -802,8 +835,8 @@
     if (label && state.preferredVoice) {
       label.textContent = shortVoiceName(state.preferredVoice);
       const isEnhanced = state.preferredVoice.name.includes('Enhanced') ||
-                         state.preferredVoice.name.includes('Premium') ||
-                         state.preferredVoice.name.includes('Neural');
+        state.preferredVoice.name.includes('Premium') ||
+        state.preferredVoice.name.includes('Neural');
       label.className = 'tts-voice-label' + (isEnhanced ? ' tts-voice-enhanced' : ' tts-voice-basic');
     }
   }
@@ -820,10 +853,10 @@
     // When we leave (next sentence is in a different para), restore the old one.
     if (s.paraEl && s.paraEl !== state.wordState.wrappedEl) {
       restoreWordSpans(state.wordState.wrappedEl);
-      state.wordState.spans          = wrapWordsInElement(s.paraEl);
-      state.wordState.wrappedEl      = s.paraEl;
+      state.wordState.spans = wrapWordsInElement(s.paraEl);
+      state.wordState.wrappedEl = s.paraEl;
       state.wordState.paraWordOffset = 0;
-      state.wordState.activeSpan     = null;
+      state.wordState.activeSpan = null;
     }
 
     // Remember word start position for this sentence within the paragraph
@@ -832,16 +865,16 @@
     // DOM word array (original text) for span indexing
     // Normalized text may have more words than DOM (e.g. "150" → "one hundred fifty")
     // so we always use domText word counts when indexing into DOM spans.
-    const domWordArr  = (s.domText || s.text).split(/\s+/).filter(Boolean);
+    const domWordArr = (s.domText || s.text).split(/\s+/).filter(Boolean);
     const normWordArr = s.text.split(/\s+/).filter(Boolean);
 
     // ── Build utterance ──
-    const baseRate  = s.rate * state.speedMultiplier * 0.95;
+    const baseRate = s.rate * state.speedMultiplier * 0.95;
     const utterance = new SpeechSynthesisUtterance(s.text);
-    utterance.rate   = Math.max(0.5, Math.min(1.8, baseRate));
-    utterance.pitch  = s.type === 'heading'    ? 1.08 :
-                       s.type === 'conclusion' ? 0.96 :
-                       s.type === 'thesis'     ? 0.98 : 1.0;
+    utterance.rate = Math.max(0.5, Math.min(1.8, baseRate));
+    utterance.pitch = s.type === 'heading' ? 1.08 :
+      s.type === 'conclusion' ? 0.96 :
+        s.type === 'thesis' ? 0.98 : 1.0;
     utterance.volume = 1.0;
     if (state.preferredVoice) utterance.voice = state.preferredVoice;
 
@@ -852,9 +885,9 @@
     // If the voice also emits onboundary word events, switch to those on the
     // first event for precise sync and stop the timer.
     // This guarantees visible highlighting regardless of voice support.
-    const wpm       = 140 * utterance.rate;
+    const wpm = 140 * utterance.rate;
     const msPerWord = Math.max(60, 60000 / wpm);
-    let timingIdx   = 0;    // which DOM span the timer is currently on
+    let timingIdx = 0;    // which DOM span the timer is currently on
     let usingBoundary = false; // true once we've seen the first word boundary event
 
     function startTimingInterval() {
@@ -893,7 +926,7 @@
 
       // charIndex is the byte offset of the word in utterance.text (normalized).
       // Count spaces before it to get the 0-based word index in normalized text.
-      const textBefore  = s.text.slice(0, e.charIndex);
+      const textBefore = s.text.slice(0, e.charIndex);
       const normWordIdx = textBefore.split(/\s+/).filter(Boolean).length;
 
       // Map normalized index → DOM span index proportionally.
@@ -901,9 +934,9 @@
       // ("150" → "one hundred fifty" = 3 norm words vs 1 DOM word).
       const mappedDomIdx = normWordArr.length > 0
         ? Math.min(
-            Math.round((normWordIdx / normWordArr.length) * domWordArr.length),
-            domWordArr.length - 1
-          )
+          Math.round((normWordIdx / normWordArr.length) * domWordArr.length),
+          domWordArr.length - 1
+        )
         : normWordIdx;
 
       const span = state.wordState.spans[sentenceWordStart + mappedDomIdx];
@@ -998,7 +1031,7 @@
     // Fully reset word wrapping so speakCurrent() re-wraps from scratch
     restoreWordSpans(state.wordState.wrappedEl);
     state.wordState.wrappedEl = null;
-    state.wordState.spans     = [];
+    state.wordState.spans = [];
     state.wordState.activeSpan = null;
 
     state.index = Math.max(0, Math.min(state.sentences.length - 1, state.index + dir));
@@ -1029,7 +1062,7 @@
 
   function stopAndClose() {
     state.playing = false;
-    state.paused  = false;
+    state.paused = false;
     speechSynthesis.cancel();
     if (state.wordState.timingInterval) {
       clearInterval(state.wordState.timingInterval);
@@ -1038,10 +1071,11 @@
     saveBookmark(state.index);
     _session++;                    // invalidate any running background tasks
     state.sentences = [];
-    state.index     = -1;
+    state.index = -1;
     resetWordState();
     clearHighlight();
     clearKnowledgeHighlights();
+    hideHoverTooltip();
     if (state.playerEl) {
       state.playerEl.remove();
       state.playerEl = null;
@@ -1097,11 +1131,11 @@
     // then normalize each sentence individually for clean speech output.
     const allSentences = [];
     for (const block of blocks) {
-      const domSents  = splitSentences(block.text);              // original
+      const domSents = splitSentences(block.text);              // original
       const normSents = domSents.map(t => normalizeForSpeech(t)); // spoken
       const annotated = ruleBasedAnnotate(normSents, block.tag);
       annotated.forEach((s, i) => {
-        s.paraEl  = block.el;
+        s.paraEl = block.el;
         s.paraTag = block.tag;
         s.domText = domSents[i] || s.text; // original DOM text for span counting
       });
@@ -1119,12 +1153,21 @@
     await voicePromise;
 
     const savedIndex = await loadBookmark();
-    state.index = (savedIndex > 0 && savedIndex < allSentences.length) ? savedIndex : 0;
+    const naturalStart = findNaturalStartIndex(allSentences);
 
-    const resumeLabel = state.index > 0 ? ` · resuming at ${state.index + 1}` : '';
+    // Use saved bookmark only if it's meaningfully past the natural start
+    // (prevents re-starting in a nav element due to a stale bookmark)
+    state.index = (savedIndex > naturalStart && savedIndex < allSentences.length)
+      ? savedIndex
+      : naturalStart;
+
+    const resumeLabel = state.index > naturalStart ? ` · resuming at ${state.index + 1}` : '';
     setStatus(`${allSentences.length} sentences${resumeLabel}`);
     highlight(state.index);
     updateUI();
+
+    // Activate hover-to-read now that the reader is live
+    initHoverReading();
 
     // Start speaking immediately
     state.playing = true;
@@ -1136,6 +1179,142 @@
     // ── PHASE 2: AI upgrade + knowledge extraction in background ──
     upgradeWithAI(blocks, allSentences, mySession);
     runKnowledgeExtraction(blocks, mySession);
+  }
+
+  // ─────────────────────────────────────────────
+  // HOVER-TO-READ SYSTEM
+  // When the player is open, hovering over content elements
+  // shows a floating "▶ Read from here" tooltip pill.
+  // Clicking it immediately jumps reading to that block.
+  // ─────────────────────────────────────────────
+
+  const HOVER_TAGS = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'LI', 'BLOCKQUOTE', 'TD', 'TH']);
+
+  function initHoverReading() {
+    if (state.hoverListenersAdded) return;
+    state.hoverListenersAdded = true;
+
+    document.body.addEventListener('mouseover', onContentMouseOver, { passive: true });
+    document.body.addEventListener('mouseleave', onContentMouseLeave, { passive: true });
+  }
+
+  function onContentMouseOver(e) {
+    // Only active while player is showing
+    if (!state.playerEl) return;
+
+    // Walk up to find a relevant block element
+    let target = e.target;
+    while (target && target !== document.body) {
+      if (HOVER_TAGS.has(target.tagName)) break;
+      target = target.parentElement;
+    }
+    if (!target || target === document.body) return;
+    // Don't hover-highlight the player itself or the tooltip
+    if (target.closest('#tts-player') || target.closest('.tts-hover-tooltip')) return;
+    // Only hover elements that are actually in our extracted sentences
+    const matchedSentence = state.sentences.find(s => s.paraEl === target);
+    if (!matchedSentence) return;
+
+    if (target === state.hoverEl) return; // same element, nothing to do
+    hideHoverTooltip();
+    state.hoverEl = target;
+    target.classList.add('tts-hover-highlight');
+    showHoverTooltip(target, matchedSentence);
+  }
+
+  function onContentMouseLeave(e) {
+    // Hide when the mouse leaves the document body entirely
+    if (!e.relatedTarget || e.relatedTarget === document.documentElement) {
+      hideHoverTooltip();
+    }
+  }
+
+  function showHoverTooltip(el, sentence) {
+    // Remove any existing tooltip first
+    if (state.hoverTooltipEl) state.hoverTooltipEl.remove();
+
+    const tooltip = document.createElement('div');
+    tooltip.className = 'tts-hover-tooltip';
+
+    const label = document.createElement('span');
+    label.className = 'tts-tooltip-label';
+    label.textContent = sentence.paraTag === 'H1' || sentence.paraTag === 'H2' ? '📖 Section' : '¶ Paragraph';
+
+    const btn = document.createElement('button');
+    btn.className = 'tts-tooltip-btn';
+    btn.textContent = '▶ Read from here';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      jumpToElement(el);
+      hideHoverTooltip();
+    });
+
+    // Prevent the tooltip itself from triggering mouseleave on the element
+    tooltip.addEventListener('mouseover', (e) => e.stopPropagation());
+
+    tooltip.appendChild(label);
+    tooltip.appendChild(btn);
+    document.body.appendChild(tooltip);
+    state.hoverTooltipEl = tooltip;
+
+    // Position tooltip above the element, clamped to viewport
+    positionTooltip(tooltip, el);
+  }
+
+  function positionTooltip(tooltip, el) {
+    const rect = el.getBoundingClientRect();
+    const tw = tooltip.offsetWidth || 180;
+    const th = tooltip.offsetHeight || 34;
+    const GAP = 6; // px gap between element top and tooltip bottom
+
+    let top = rect.top - th - GAP;
+    let left = rect.left + (rect.width / 2) - (tw / 2);
+
+    // Clamp within viewport
+    top = Math.max(6, Math.min(top, window.innerHeight - th - 6));
+    left = Math.max(6, Math.min(left, window.innerWidth - tw - 6));
+
+    tooltip.style.top = top + 'px';
+    tooltip.style.left = left + 'px';
+  }
+
+  function hideHoverTooltip() {
+    if (state.hoverTooltipEl) {
+      state.hoverTooltipEl.remove();
+      state.hoverTooltipEl = null;
+    }
+    if (state.hoverEl) {
+      state.hoverEl.classList.remove('tts-hover-highlight');
+      state.hoverEl = null;
+    }
+  }
+
+  // Jump reading to the first sentence of the given DOM element.
+  function jumpToElement(el) {
+    // Find the first sentence whose paraEl matches this element
+    const targetIdx = state.sentences.findIndex(s => s.paraEl === el);
+    if (targetIdx < 0) return;
+
+    // Cancel current speech and word state
+    speechSynthesis.cancel();
+    clearWordHighlight();
+    if (state.wordState.timingInterval) {
+      clearInterval(state.wordState.timingInterval);
+      state.wordState.timingInterval = null;
+    }
+    restoreWordSpans(state.wordState.wrappedEl);
+    state.wordState.wrappedEl = null;
+    state.wordState.spans = [];
+    state.wordState.activeSpan = null;
+    state.wordState.paraWordOffset = 0;
+
+    state.index = targetIdx;
+    state.playing = true;
+    state.paused = false;
+
+    highlight(state.index);
+    updateUI();
+    setTimeout(() => speakCurrent(), 80);
   }
 
   // ─────────────────────────────────────────────
@@ -1164,7 +1343,7 @@
       }
 
       const chunkStart = sentOffset;
-      const chunkEnd   = sentOffset + chunkSentCount;
+      const chunkEnd = sentOffset + chunkSentCount;
       sentOffset = chunkEnd;
 
       // Bail out if a newer session (new page / close) has started
@@ -1189,11 +1368,11 @@
           if (!ai || !ai.text) continue;
 
           // Preserve DOM references — only update speech parameters
-          sentences[si].text        = ai.text;
-          sentences[si].rate        = ai.rate        ?? sentences[si].rate;
+          sentences[si].text = ai.text;
+          sentences[si].rate = ai.rate ?? sentences[si].rate;
           sentences[si].pause_after = ai.pause_after ?? sentences[si].pause_after;
-          sentences[si].important   = ai.important   ?? sentences[si].important;
-          sentences[si].type        = ai.type        ?? sentences[si].type;
+          sentences[si].important = ai.important ?? sentences[si].important;
+          sentences[si].type = ai.type ?? sentences[si].type;
         }
       } catch {
         // Silent failure — rule-based version stays in place
@@ -1237,14 +1416,14 @@
       if (!block || used.has(block.el)) continue;
       used.add(block.el);
 
-      const el       = block.el;
+      const el = block.el;
       const cssClass = `tts-knowledge-${ke.importance}`;
       el.classList.add(cssClass);
 
       // Prepend an inline badge for critical + high elements
       if (ke.importance !== 'medium') {
         const badge = document.createElement('span');
-        badge.className   = 'tts-knowledge-badge';
+        badge.className = 'tts-knowledge-badge';
         badge.textContent = ke.label || ke.category || ke.importance;
         el.insertBefore(badge, el.firstChild);
         state.knowledgeHighlights.push({ el, cssClass, badge });
@@ -1283,8 +1462,8 @@
   // Orchestrate knowledge extraction: call AI, apply highlights, show summary
   async function runKnowledgeExtraction(blocks, mySession) {
     // Show the insights row with a pulsing dot
-    const row  = document.getElementById('tts-insights-row');
-    const dot  = document.getElementById('tts-insights-dot');
+    const row = document.getElementById('tts-insights-row');
+    const dot = document.getElementById('tts-insights-dot');
     const text = document.getElementById('tts-insights-text');
     if (row) row.style.display = 'flex';
 
@@ -1300,7 +1479,7 @@
 
       if (!key_elements || !key_elements.length) {
         if (text) text.textContent = 'No key insights found';
-        if (dot)  { dot.classList.add('done'); }
+        if (dot) { dot.classList.add('done'); }
         return;
       }
 
@@ -1317,15 +1496,15 @@
       // Show summary panel
       if (summary) {
         const panel = document.getElementById('tts-summary-panel');
-        const body  = document.getElementById('tts-summary-body');
+        const body = document.getElementById('tts-summary-body');
         if (panel) panel.style.display = 'block';
-        if (body)  body.textContent    = summary;
+        if (body) body.textContent = summary;
       }
 
     } catch (err) {
       console.warn('[TTS] Knowledge extraction failed:', err.message);
       if (text) text.textContent = 'AI insights unavailable';
-      if (dot)  { dot.style.background = '#6b7280'; dot.style.animation = 'none'; }
+      if (dot) { dot.style.background = '#6b7280'; dot.style.animation = 'none'; }
     }
   }
 

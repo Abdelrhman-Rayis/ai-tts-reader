@@ -132,10 +132,10 @@ app.post('/api/extract-knowledge', async (req, res) => {
     result.key_elements = result.key_elements
       .filter(e => e.match && e.importance && e.label)
       .map(e => ({
-        match:      String(e.match).trim(),
+        match: String(e.match).trim(),
         importance: ['critical', 'high', 'medium'].includes(e.importance) ? e.importance : 'medium',
-        category:   String(e.category || 'insight').trim(),
-        label:      String(e.label).trim().slice(0, 20)
+        category: String(e.category || 'insight').trim(),
+        label: String(e.label).trim().slice(0, 20)
       }));
 
     console.log(`[knowledge] ${result.key_elements.length} elements | ${message.usage.input_tokens}→${message.usage.output_tokens} tokens`);
@@ -234,8 +234,11 @@ app.get('/api/health', (req, res) => {
 // Start
 // ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`\n🎧 AI TTS Reader server running on http://localhost:${PORT}`);
-  console.log(`   Model: claude-haiku-4-5-20251001`);
-  console.log(`   Health: http://localhost:${PORT}/api/health\n`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`\n🎧 AI TTS Reader server running on http://localhost:${PORT}`);
+    console.log(`   Model: claude-haiku-4-5-20251001`);
+    console.log(`   Health: http://localhost:${PORT}/api/health\n`);
+  });
+}
+module.exports = app;
